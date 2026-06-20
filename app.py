@@ -140,40 +140,47 @@ def get_processed_data():
             reads = reads.iloc[:, :3]
             reads.columns = ['Chip_ID', 'Timestamp', 'Bib']
             
-            # Clean timestamp string formats safely
-            if pd.api.types.is_datetime64_any_dtype(reads['Timestamp']):
-                reads['Timestamp'] = reads['Timestamp'].dt.strftime('%H:%M:%S')
-            else:
-                reads['Timestamp'] = reads['Timestamp'].astype(str).str.strip("'\" ")
-            
             # Convert visual helper Bib column cleanly to numbers
             reads['Bib'] = pd.to_numeric(reads['Bib'], errors='coerce').fillna(0).astype(int)
 
-            # Silently drop uncalculated or empty helper rows without short-circuiting the script execution
+            # Silently drop uncalculated or empty helper rows
             reads = reads[reads['Bib'] > 0]
 
-            # Re-check true dataset depth before continuing to aggregation steps
             if len(reads) == 0:
                 return pd.DataFrame(), pd.DataFrame()
 
+            # Clean and split timestamps into pure HH:MM:SS text first
+            def extract_time_str(val):
+                try:
+                    clean = str(val).strip("'\" ")
+                    return clean.split()[-1]
+                except Exception:
+                    return "00:00:00"
+
+            reads['Time_Str'] = reads['Timestamp'].apply(extract_time_str)
+
+            # --- CHRONOLOGICAL TIMING SAFETY ENGINE ---
+            # Force parse text strings into true datetime values so mathematical max comparison works perfectly
+            reads['Time_Object'] = pd.to_datetime(reads['Time_Str'], format='%H:%M:%S', errors='coerce')
+            
+            # Fill parsing errors with a baseline time object to prevent sorting crashes
+            fallback_time = pd.to_datetime("00:00:00", format='%H:%M:%S')
+            reads['Time_Object'] = reads['Time_Object'].fillna(fallback_time)
+
             start_time = datetime.strptime("08:00:00", "%H:%M:%S")
             
-            # Group rows by numeric Bib values
+            # Group rows by numeric Bib values using the chronological Time_Object for 'max'
             stats = reads.groupby('Bib').agg(
-                Loop_Count=('Timestamp', 'count'),
-                Last_Read=('Timestamp', 'max')
+                Loop_Count=('Time_Object', 'count'),
+                Last_Read=('Time_Object', 'max')
             ).reset_index()
             
             df = pd.merge(roster, stats, on='Bib', how='inner')
             df['Mileage'] = df['Loop_Count'] * 4
             
-            def calc_elapsed(ts_str):
+            def calc_elapsed(dt_obj):
                 try:
-                    clean_ts = str(ts_str).strip("'\" ")
-                    ts_part = clean_ts.split()[-1]
-                    
-                    ts = datetime.strptime(ts_part, "%H:%M:%S")
-                    delta = ts - start_time
+                    delta = dt_obj - start_time
                     hours, remainder = divmod(delta.seconds, 3600)
                     minutes, seconds = divmod(remainder, 60)
                     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
